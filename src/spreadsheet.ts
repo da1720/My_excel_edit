@@ -2607,19 +2607,23 @@ export class SpreadsheetEngine {
 
                 if (isFiltered && r > (table.hasHeader ? startR : startR - 1)) {
                     (cellEl as HTMLElement).style.display = 'none';
+                    this.grid.style.setProperty(`--row-height-${r}`, '0px');
                     const rowHeader = this.grid.querySelector(`.row-header[style*="grid-row: ${r + 1}"]`) as HTMLElement;
                     if (rowHeader) rowHeader.style.display = 'none';
                 } else {
-                    (cellEl as HTMLElement).style.display = 'flex';
+                    (cellEl as HTMLElement).style.display = '';
+                    // Restore original height if it was set, otherwise default to auto/25px
+                    // For simplicity, we'll try to get it from sheet metadata or use a default
+                    this.grid.style.removeProperty(`--row-height-${r}`);
                     const rowHeader = this.grid.querySelector(`.row-header[style*="grid-row: ${r + 1}"]`) as HTMLElement;
-                    if (rowHeader) rowHeader.style.display = 'flex';
+                    if (rowHeader) rowHeader.style.display = '';
                 }
             } else {
                 (cellEl as HTMLElement).classList.remove('table-cell', 'table-blue', 'table-green', 'table-orange', 'table-header', 'table-row-even', 'table-row-odd');
-                (cellEl as HTMLElement).style.display = 'flex';
+                (cellEl as HTMLElement).style.display = '';
                 const { r } = this.parseCellId(id);
                 const rowHeader = this.grid.querySelector(`.row-header[style*="grid-row: ${r + 1}"]`) as HTMLElement;
-                if (rowHeader) rowHeader.style.display = 'flex';
+                if (rowHeader) rowHeader.style.display = '';
             }
 
             // Evaluate Conditional Formatting
@@ -2780,7 +2784,7 @@ export class SpreadsheetEngine {
                 cell.computedValue = val;
                 this.updateGridDisplay();
                 this.recalculate(id);
-                document.body.removeChild(menu);
+                if (menu.parentNode) menu.remove();
             };
             menu.appendChild(item);
         });
@@ -2789,7 +2793,7 @@ export class SpreadsheetEngine {
 
         const close = (e: MouseEvent) => {
             if (!menu.contains(e.target as Node)) {
-                document.body.removeChild(menu);
+                if (menu.parentNode) menu.remove();
                 window.removeEventListener('click', close);
             }
         };
@@ -2854,8 +2858,8 @@ export class SpreadsheetEngine {
         document.body.appendChild(dialog);
 
         const close = () => {
-            document.body.removeChild(overlay);
-            document.body.removeChild(dialog);
+            if (overlay.parentNode) overlay.remove();
+            if (dialog.parentNode) dialog.remove();
         };
 
         dialog.querySelector('#btn-cancel-height')?.addEventListener('click', close);
@@ -2927,8 +2931,8 @@ export class SpreadsheetEngine {
         document.body.appendChild(dialog);
 
         const close = () => {
-            document.body.removeChild(overlay);
-            document.body.removeChild(dialog);
+            if (overlay.parentNode) overlay.remove();
+            if (dialog.parentNode) dialog.remove();
         };
 
         dialog.querySelector('#btn-cancel-width')?.addEventListener('click', close);
@@ -3001,8 +3005,8 @@ export class SpreadsheetEngine {
         document.body.appendChild(dialog);
 
         const close = () => {
-            document.body.removeChild(overlay);
-            document.body.removeChild(dialog);
+            if (overlay.parentNode) overlay.remove();
+            if (dialog.parentNode) dialog.remove();
         };
 
         dialog.querySelector('#btn-cancel-pivot')?.addEventListener('click', close);
@@ -3118,8 +3122,8 @@ export class SpreadsheetEngine {
         document.body.appendChild(dialog);
 
         const close = () => {
-            document.body.removeChild(overlay);
-            document.body.removeChild(dialog);
+            if (overlay.parentNode) overlay.remove();
+            if (dialog.parentNode) dialog.remove();
         };
 
         dialog.querySelector('#btn-cancel-comment')?.addEventListener('click', close);
@@ -3193,8 +3197,8 @@ export class SpreadsheetEngine {
         document.body.appendChild(dialog);
 
         const close = () => {
-            document.body.removeChild(overlay);
-            document.body.removeChild(dialog);
+            if (overlay.parentNode) overlay.remove();
+            if (dialog.parentNode) dialog.remove();
         };
 
         dialog.querySelector('#btn-cancel-name')?.addEventListener('click', close);
@@ -3297,8 +3301,8 @@ export class SpreadsheetEngine {
         };
 
         const close = () => {
-            document.body.removeChild(overlay);
-            document.body.removeChild(dialog);
+            if (overlay.parentNode) overlay.remove();
+            if (dialog.parentNode) dialog.remove();
         };
 
         dialog.querySelector('#btn-cancel-val')?.addEventListener('click', close);
@@ -3383,7 +3387,7 @@ export class SpreadsheetEngine {
         document.body.appendChild(dialog);
         this.refreshIcons();
 
-        const close = () => document.body.removeChild(dialog);
+        const close = () => { if (dialog.parentNode) dialog.remove(); };
         dialog.querySelector('.close-btn')?.addEventListener('click', close);
         dialog.querySelector('#btn-cancel-table')?.addEventListener('click', close);
         
@@ -3439,7 +3443,7 @@ export class SpreadsheetEngine {
 
     private showFilterMenu(table: Table, colIndex: number, event: MouseEvent) {
         const existingMenu = document.querySelector('.filter-menu');
-        if (existingMenu) document.body.removeChild(existingMenu);
+        if (existingMenu && existingMenu.parentNode) existingMenu.remove();
 
         const menu = document.createElement('div');
         menu.className = 'filter-menu';
@@ -3483,28 +3487,49 @@ export class SpreadsheetEngine {
 
         menu.querySelector('#sort-asc')?.addEventListener('click', () => {
             this.sortTable(table, colIndex, 'asc');
-            document.body.removeChild(menu);
+            if (menu.parentNode) menu.remove();
         });
 
         menu.querySelector('#sort-desc')?.addEventListener('click', () => {
             this.sortTable(table, colIndex, 'desc');
-            document.body.removeChild(menu);
+            if (menu.parentNode) menu.remove();
         });
 
-        menu.querySelector('#filter-ok')?.addEventListener('click', () => {
+        const okBtn = menu.querySelector('#filter-ok');
+        const cancelBtn = menu.querySelector('#filter-cancel');
+        const filterAll = menu.querySelector('#filter-all') as HTMLInputElement;
+        const searchInput = menu.querySelector('.filter-search') as HTMLInputElement;
+        const filterList = menu.querySelector('.filter-list');
+
+        filterAll?.addEventListener('change', () => {
+            menu.querySelectorAll('.filter-val').forEach(el => {
+                (el as HTMLInputElement).checked = filterAll.checked;
+            });
+        });
+
+        searchInput?.addEventListener('input', () => {
+            const term = searchInput.value.toLowerCase();
+            menu.querySelectorAll('.filter-item').forEach(item => {
+                if (item.contains(filterAll)) return;
+                const text = item.textContent?.toLowerCase() || '';
+                (item as HTMLElement).style.display = text.includes(term) ? 'flex' : 'none';
+            });
+        });
+
+        okBtn?.addEventListener('click', () => {
             const checked = Array.from(menu.querySelectorAll('.filter-val:checked')).map(el => (el as HTMLInputElement).value);
-            this.filterTable(table, colIndex, checked.length === sortedValues.length ? [] : checked);
-            document.body.removeChild(menu);
+            this.filterTable(table, colIndex, checked.length === values.size ? [] : checked);
+            if (menu.parentNode) menu.remove();
         });
 
-        menu.querySelector('#filter-cancel')?.addEventListener('click', () => {
-            document.body.removeChild(menu);
+        cancelBtn?.addEventListener('click', () => {
+            if (menu.parentNode) menu.remove();
         });
 
         // Close on click outside
         const outsideClick = (e: MouseEvent) => {
             if (!menu.contains(e.target as Node)) {
-                document.body.removeChild(menu);
+                if (menu.parentNode) menu.remove();
                 window.removeEventListener('mousedown', outsideClick);
             }
         };
@@ -3521,7 +3546,13 @@ export class SpreadsheetEngine {
         for (let r = dataRowsStart; r <= endR; r++) {
             const rowData = [];
             for (let c = startC; c <= endC; c++) {
-                rowData.push(this.store.getCell(sheetName, `${COL_NAMES[c]}${r}`));
+                const cell = this.store.getCell(sheetName, `${COL_NAMES[c]}${r}`);
+                rowData.push({
+                    formula: cell.formula,
+                    rawValue: cell.rawValue,
+                    computedValue: cell.computedValue,
+                    format: { ...cell.format }
+                });
             }
             rows.push(rowData);
         }
@@ -3611,7 +3642,7 @@ export class SpreadsheetEngine {
 
         document.body.appendChild(dialog);
 
-        const close = () => document.body.removeChild(dialog);
+        const close = () => { if (dialog.parentNode) dialog.remove(); };
 
         dialog.querySelector('#cond-cancel')?.addEventListener('click', close);
         
@@ -3884,7 +3915,7 @@ export class SpreadsheetEngine {
         `;
         document.body.appendChild(dialog);
 
-        const close = () => document.body.removeChild(dialog);
+        const close = () => { if (dialog.parentNode) dialog.remove(); };
         dialog.querySelector('.close-btn')?.addEventListener('click', close);
         dialog.querySelector('#btn-cancel-paste')?.addEventListener('click', close);
 
@@ -4066,7 +4097,7 @@ export class SpreadsheetEngine {
         document.body.appendChild(dialog);
         this.refreshIcons();
 
-        const close = () => document.body.removeChild(dialog);
+        const close = () => { if (dialog.parentNode) dialog.remove(); };
         dialog.querySelector('.modal-close')?.addEventListener('click', close);
         dialog.querySelector('#btn-close-shortcuts')?.addEventListener('click', close);
         dialog.addEventListener('click', (e) => {
@@ -4131,7 +4162,7 @@ export class SpreadsheetEngine {
             formulaList.innerHTML = this.generateFormulaList(filtered);
         });
 
-        const close = () => document.body.removeChild(dialog);
+        const close = () => { if (dialog.parentNode) dialog.remove(); };
         dialog.querySelector('.modal-close')?.addEventListener('click', close);
         dialog.querySelector('#btn-close-formula-help')?.addEventListener('click', close);
         dialog.addEventListener('click', (e) => {
@@ -4213,7 +4244,7 @@ export class SpreadsheetEngine {
         const matchCaseCheck = dialog.querySelector('#match-case') as HTMLInputElement;
         const matchEntireCheck = dialog.querySelector('#match-entire') as HTMLInputElement;
 
-        const close = () => document.body.removeChild(dialog);
+        const close = () => { if (dialog.parentNode) dialog.remove(); };
 
         dialog.querySelector('.modal-close')?.addEventListener('click', close);
         dialog.querySelector('#btn-close-find')?.addEventListener('click', close);
@@ -4423,7 +4454,7 @@ export class SpreadsheetEngine {
         const sheetSelect = dialog.querySelector('#link-sheet') as HTMLSelectElement;
         const cellInput = dialog.querySelector('#link-cell-id') as HTMLInputElement;
 
-        const close = () => document.body.removeChild(dialog);
+        const close = () => { if (dialog.parentNode) dialog.remove(); };
 
         dialog.querySelector('.modal-close')?.addEventListener('click', close);
         dialog.querySelector('#btn-close-link')?.addEventListener('click', close);
@@ -4506,7 +4537,58 @@ export class SpreadsheetEngine {
     }
 
     private toggleFilter() {
-        alert('Filter feature is currently in development.');
+        if (!this.activeCell) return;
+        
+        const sheetName = this.store.getActiveSheetName();
+        const metadata = this.store.getMetadata(sheetName);
+        
+        // Find if any table already covers the active cell
+        const existingTableIdx = metadata.tables.findIndex(t => this.isCellInTable(this.activeCell!, t));
+        
+        if (existingTableIdx !== -1) {
+            const table = metadata.tables[existingTableIdx];
+            // Reset row heights for the table range
+            const { startR, endR } = this.parseRange(table.range);
+            for (let r = startR; r <= endR; r++) {
+                this.grid.style.removeProperty(`--row-height-${r}`);
+            }
+            // Remove filter (table)
+            metadata.tables.splice(existingTableIdx, 1);
+        } else {
+            // Apply filter (default blue table)
+            let range = this.getSelectionRange();
+            if (!range.includes(':')) {
+                range = this.findContiguousRange(this.activeCell);
+            }
+            
+            const newTable: Table = {
+                id: 'table-' + Math.random().toString(36).substr(2, 9),
+                range: range,
+                hasHeader: true,
+                style: 'blue',
+                filters: {}
+            };
+            metadata.tables.push(newTable);
+        }
+        
+        this.updateGridDisplay();
+    }
+
+    private findContiguousRange(cellId: string): string {
+        const { r, c } = this.parseCellId(cellId);
+        const sheetName = this.store.getActiveSheetName();
+        
+        let minR = r, maxR = r, minC = c, maxC = c;
+        
+        // Find top-left
+        while (minR > 1 && this.store.getCell(sheetName, `${COL_NAMES[minC]}${minR - 1}`).rawValue !== '') minR--;
+        while (minC > 0 && this.store.getCell(sheetName, `${COL_NAMES[minC - 1]}${minR}`).rawValue !== '') minC--;
+        
+        // Find bottom-right
+        while (maxR < DEFAULT_ROWS && this.store.getCell(sheetName, `${COL_NAMES[maxC]}${maxR + 1}`).rawValue !== '') maxR++;
+        while (maxC < DEFAULT_COLS - 1 && this.store.getCell(sheetName, `${COL_NAMES[maxC + 1]}${maxR}`).rawValue !== '') maxC++;
+        
+        return `${COL_NAMES[minC]}${minR}:${COL_NAMES[maxC]}${maxR}`;
     }
 
     private async importFromExcel(file: File) {
@@ -4905,7 +4987,7 @@ export class SpreadsheetEngine {
 
         dialog.querySelector('#btn-ignore-restore')?.addEventListener('click', () => {
             localStorage.removeItem('spreadsheet_autosave');
-            document.body.removeChild(dialog);
+            if (dialog.parentNode) dialog.remove();
         });
 
         dialog.querySelector('#btn-confirm-restore')?.addEventListener('click', () => {
@@ -4914,7 +4996,7 @@ export class SpreadsheetEngine {
                 this.initTabs();
                 this.updateGridDisplay();
             }
-            document.body.removeChild(dialog);
+            if (dialog.parentNode) dialog.remove();
         });
     }
 }
