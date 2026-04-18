@@ -1,0 +1,5 @@
+{
+  "name": "Vanilla Spreadsheet Engine",
+  "description": "A high-performance, zero-dependency MS Excel clone built with vanilla JavaScript, featuring a custom formula engine, DAG-based recalculation, and SpreadsheetML export.",
+  "requestFramePermissions": []
+}
