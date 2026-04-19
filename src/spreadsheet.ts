@@ -87,6 +87,10 @@ interface ChartData {
     type: 'bar' | 'line' | 'pie' | 'scatter';
     range: string;
     title: string;
+    xAxisTitle?: string;
+    yAxisTitle?: string;
+    showPoints?: boolean;
+    colorScheme?: string;
     x: number;
     y: number;
     width: number;
@@ -242,6 +246,36 @@ class SpreadsheetStore {
         return sheetName;
     }
 
+    duplicateSheet(name: string): string | null {
+        if (!this.state.sheets.has(name)) return null;
+        
+        this.saveHistory();
+        const sourceSheet = this.state.sheets.get(name)!;
+        const sourceMeta = this.state.metadata.get(name)!;
+        
+        const newName = this.addSheet(name + ' (Copy)');
+        const newSheet: SheetState = new Map();
+        
+        sourceSheet.forEach((cell, id) => {
+            newSheet.set(id, {
+                ...cell,
+                precedents: new Set(cell.precedents),
+                dependents: new Set(cell.dependents),
+                format: { ...cell.format },
+                conditionalRules: cell.conditionalRules.map(r => ({ ...r, format: { ...r.format } }))
+            });
+        });
+        
+        this.state.sheets.set(newName, newSheet);
+        this.state.metadata.set(newName, {
+            ...sourceMeta,
+            tables: sourceMeta.tables.map(t => ({ ...t, filters: { ...t.filters } })),
+            charts: sourceMeta.charts.map(c => ({ ...c }))
+        });
+        
+        return newName;
+    }
+
     renameSheet(oldName: string, newName: string) {
         if (oldName === newName) return true;
         if (this.state.sheets.has(newName)) {
@@ -251,13 +285,23 @@ class SpreadsheetStore {
 
         this.saveHistory();
 
-        const sheetData = this.state.sheets.get(oldName)!;
-        this.state.sheets.delete(oldName);
-        this.state.sheets.set(newName, sheetData);
+        // Preserve order while renaming
+        const entries = Array.from(this.state.sheets.entries());
+        const metaEntries = Array.from(this.state.metadata.entries());
+        
+        const index = entries.findIndex(([name]) => name === oldName);
+        if (index !== -1) {
+            const sheetData = entries[index][1];
+            entries[index] = [newName, sheetData];
+            this.state.sheets = new Map(entries);
+        }
 
-        const metadata = this.state.metadata.get(oldName)!;
-        this.state.metadata.delete(oldName);
-        this.state.metadata.set(newName, metadata);
+        const metaIndex = metaEntries.findIndex(([name]) => name === oldName);
+        if (metaIndex !== -1) {
+            const metadata = metaEntries[metaIndex][1];
+            metaEntries[metaIndex] = [newName, metadata];
+            this.state.metadata = new Map(metaEntries);
+        }
 
         if (this.state.activeSheet === oldName) {
             this.state.activeSheet = newName;
@@ -1246,6 +1290,7 @@ export class SpreadsheetEngine {
                     <div class="tabs-list"></div>
                     <div class="add-sheet-btn" title="New Sheet"><i data-lucide="plus"></i></div>
                 </div>
+                <div class="app-watermark">&copy; tomprosoft.2026</div>
                 <div id="formula-suggestions" class="formula-suggestions" style="display: none;"></div>
                 <div id="formula-preview" class="formula-preview" style="display: none;"></div>
             </div>
@@ -1379,11 +1424,22 @@ export class SpreadsheetEngine {
         sheets.forEach((sheetName, index) => {
             const tab = document.createElement('div');
             tab.className = `tab ${sheetName === this.store.getActiveSheetName() ? 'active' : ''}`;
-            tab.textContent = sheetName;
-            tab.title = 'Double-click to rename, Right-click to delete';
-            tab.draggable = true; // Enable drag and drop
+            tab.innerHTML = `<span>${sheetName}</span><i data-lucide="chevron-down" class="tab-menu-icon" style="margin-left: 8px; opacity: 0.5; display: none;"></i>`;
+            tab.title = 'Long press or right-click for options';
+            tab.draggable = true;
             
-            tab.onclick = () => {
+            if (sheetName === this.store.getActiveSheetName()) {
+                const icon = tab.querySelector('.tab-menu-icon') as HTMLElement;
+                if (icon) icon.style.display = 'block';
+            }
+
+            tab.onclick = (e) => {
+                const target = e.target as HTMLElement;
+                if (target.closest('.tab-menu-icon')) {
+                    e.stopPropagation();
+                    this.showSheetMenu(sheetName, e.clientX, e.clientY);
+                    return;
+                }
                 this.commitActiveEdit();
                 this.store.setActiveSheet(sheetName);
                 this.initTabs();
@@ -1392,23 +1448,12 @@ export class SpreadsheetEngine {
             
             tab.ondblclick = (e) => {
                 e.stopPropagation();
-                const newName = prompt('Rename sheet to:', sheetName);
-                if (newName && newName !== sheetName) {
-                    if (this.store.renameSheet(sheetName, newName)) {
-                        this.initTabs();
-                        this.initGrid();
-                    }
-                }
+                this.renameSheetDialog(sheetName);
             };
 
             tab.oncontextmenu = (e) => {
                 e.preventDefault();
-                if (confirm(`Are you sure you want to delete sheet '${sheetName}'?`)) {
-                    if (this.store.deleteSheet(sheetName)) {
-                        this.initTabs();
-                        this.initGrid();
-                    }
-                }
+                this.showSheetMenu(sheetName, e.clientX, e.clientY);
             };
 
             // Drag and Drop implementation for reordering
@@ -1423,7 +1468,7 @@ export class SpreadsheetEngine {
             });
 
             tab.addEventListener('dragover', (e) => {
-                e.preventDefault(); // Necessary to allow dropping
+                e.preventDefault(); 
                 tab.classList.add('drag-over');
             });
 
@@ -1441,26 +1486,144 @@ export class SpreadsheetEngine {
                 }
             });
 
-            // Prevent touch scrolling from interfering with drag on mobile if hold-to-drag is desired
             let holdTimer: NodeJS.Timeout;
             tab.addEventListener('touchstart', (e) => {
+                const touch = e.touches[0];
                 holdTimer = setTimeout(() => {
-                    tab.draggable = true;
-                    // Note: HTML5 drag doesn't work natively with Touch events uniformly across mobile browsers.
-                    // We prompt a simple reorder map for mobile if hold is detected, as a fallback since mobile drag-and-drop requires custom polyfills.
-                    if (confirm(`Do you want to delete '${sheetName}'?`)) {
-                        if (this.store.deleteSheet(sheetName)) {
-                            this.initTabs();
-                            this.initGrid();
-                        }
-                    }
-                }, 800);
+                    this.showSheetMenu(sheetName, touch.clientX, touch.clientY);
+                }, 600);
             }, { passive: true });
             
             tab.addEventListener('touchend', () => clearTimeout(holdTimer));
             tab.addEventListener('touchmove', () => clearTimeout(holdTimer));
 
             tabsList.appendChild(tab);
+        });
+        this.refreshIcons();
+    }
+
+    private showSheetMenu(sheetName: string, x: number, y: number) {
+        const menu = document.createElement('div');
+        menu.className = 'context-menu';
+        menu.style.left = `${Math.min(x, window.innerWidth - 170)}px`;
+        menu.style.top = `${Math.min(y, window.innerHeight - 150)}px`;
+
+        const items = [
+            { label: 'Rename', icon: 'edit-3', action: () => this.renameSheetDialog(sheetName) },
+            { label: 'Delete', icon: 'trash-2', className: 'danger', action: () => this.deleteSheetDialog(sheetName) },
+            { label: 'Duplicate', icon: 'copy', action: () => {
+                const newName = this.store.duplicateSheet(sheetName);
+                if (newName) {
+                    this.store.setActiveSheet(newName);
+                    this.initTabs();
+                    this.initGrid();
+                }
+            }}
+        ];
+
+        items.forEach(item => {
+            const div = document.createElement('div');
+            div.className = `context-menu-item ${item.className || ''}`;
+            div.innerHTML = `<i data-lucide="${item.icon}"></i> ${item.label}`;
+            div.onclick = () => {
+                item.action();
+                menu.remove();
+            };
+            menu.appendChild(div);
+        });
+
+        document.body.appendChild(menu);
+        this.refreshIcons();
+
+        const closeMenu = (e: MouseEvent) => {
+            if (!menu.contains(e.target as Node)) {
+                menu.remove();
+                document.removeEventListener('mousedown', closeMenu);
+            }
+        };
+        setTimeout(() => document.addEventListener('mousedown', closeMenu), 0);
+    }
+
+    private renameSheetDialog(sheetName: string) {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.innerHTML = `
+            <div class="modal-content" style="width: 320px;">
+                <div class="modal-header">
+                    <h3>Rename Sheet</h3>
+                    <i data-lucide="x" class="close-modal" style="cursor:pointer"></i>
+                </div>
+                <div class="modal-body" style="padding: 20px;">
+                    <input type="text" id="rename-input" value="${sheetName}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                </div>
+                <div class="modal-footer" style="padding: 15px; border-top: 1px solid #eee; display: flex; justify-content: flex-end; gap: 10px;">
+                    <button class="btn-cancel" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    <button class="btn-save" style="padding: 8px 16px; background: var(--selection-color); color: white; border: none; border-radius: 4px; cursor: pointer;">Rename</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        this.refreshIcons();
+
+        const input = overlay.querySelector('#rename-input') as HTMLInputElement;
+        input.focus();
+        input.select();
+
+        const close = () => { if (overlay.parentNode) overlay.remove(); };
+        overlay.querySelector('.close-modal')?.addEventListener('click', close);
+        overlay.querySelector('.btn-cancel')?.addEventListener('click', close);
+        
+        const save = () => {
+            const newName = input.value.trim();
+            if (newName && newName !== sheetName) {
+                if (this.store.renameSheet(sheetName, newName)) {
+                    this.initTabs();
+                    this.initGrid();
+                    close();
+                }
+            } else {
+                close();
+            }
+        };
+
+        overlay.querySelector('.btn-save')?.addEventListener('click', save);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') save();
+            if (e.key === 'Escape') close();
+        });
+    }
+
+    private deleteSheetDialog(sheetName: string) {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.innerHTML = `
+            <div class="modal-content" style="width: 320px;">
+                <div class="modal-header">
+                    <h3>Delete Sheet</h3>
+                    <i data-lucide="x" class="close-modal" style="cursor:pointer"></i>
+                </div>
+                <div class="modal-body" style="padding: 20px;">
+                    <p>Are you sure you want to delete <strong>${sheetName}</strong>?</p>
+                </div>
+                <div class="modal-footer" style="padding: 15px; border-top: 1px solid #eee; display: flex; justify-content: flex-end; gap: 10px;">
+                    <button class="btn-cancel" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    <button class="btn-delete" style="padding: 8px 16px; background: #d93025; color: white; border: none; border-radius: 4px; cursor: pointer;">Delete</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+        this.refreshIcons();
+
+        const close = () => { if (overlay.parentNode) overlay.remove(); };
+        overlay.querySelector('.close-modal')?.addEventListener('click', close);
+        overlay.querySelector('.btn-cancel')?.addEventListener('click', close);
+        
+        overlay.querySelector('.btn-delete')?.addEventListener('click', () => {
+            if (this.store.deleteSheet(sheetName)) {
+                this.initTabs();
+                this.initGrid();
+                close();
+            }
         });
     }
 
@@ -5053,28 +5216,108 @@ export class SpreadsheetEngine {
         }
 
         const range = this.getSelectionRangeString();
-        const type = prompt('Enter chart type (bar, line, pie, scatter):', 'bar') as any;
-        if (!['bar', 'line', 'pie', 'scatter'].includes(type)) return;
-
-        const title = prompt('Enter chart title:', 'New Chart') || 'New Chart';
-        
-        const sheetName = this.store.getActiveSheetName();
-        const metadata = this.store.getMetadata(sheetName);
         
         const chart: ChartData = {
             id: 'chart-' + Date.now(),
-            type,
+            type: 'bar',
             range,
-            title,
+            title: 'New Chart',
             x: 100,
             y: 100,
             width: 400,
             height: 300
         };
 
-        metadata.charts.push(chart);
-        this.store.setMetadata(sheetName, metadata);
-        this.renderCharts();
+        this.showChartSettingsDialog(chart, true);
+    }
+
+    private showChartSettingsDialog(chart: ChartData, isNew: boolean = false) {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        
+        overlay.innerHTML = `
+            <div class="modal-content" style="width: 400px;">
+                <div class="modal-header">
+                    <h3>Chart Settings</h3>
+                    <i data-lucide="x" class="close-modal" style="cursor:pointer"></i>
+                </div>
+                <div class="modal-body" style="padding: 20px;">
+                    <div style="margin-bottom: 15px;">
+                        <label style="display:block; font-size: 12px; margin-bottom: 5px;">Title</label>
+                        <input type="text" id="chart-title" value="${chart.title}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display:block; font-size: 12px; margin-bottom: 5px;">Type</label>
+                        <select id="chart-type" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                            <option value="bar" ${chart.type === 'bar' ? 'selected' : ''}>Bar Chart</option>
+                            <option value="line" ${chart.type === 'line' ? 'selected' : ''}>Line Chart</option>
+                            <option value="pie" ${chart.type === 'pie' ? 'selected' : ''}>Pie Chart</option>
+                            <option value="scatter" ${chart.type === 'scatter' ? 'selected' : ''}>Scatter Plot</option>
+                        </select>
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display:block; font-size: 12px; margin-bottom: 5px;">Data Range (e.g. A1:B10)</label>
+                        <input type="text" id="chart-range" value="${chart.range}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px;">
+                        <div>
+                            <label style="display:block; font-size: 12px; margin-bottom: 5px;">X-Axis Label</label>
+                            <input type="text" id="chart-xaxis" value="${chart.xAxisTitle || ''}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                        </div>
+                        <div>
+                            <label style="display:block; font-size: 12px; margin-bottom: 5px;">Y-Axis Label</label>
+                            <input type="text" id="chart-yaxis" value="${chart.yAxisTitle || ''}" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                        </div>
+                    </div>
+                    <div style="margin-bottom: 15px;">
+                        <label style="display:flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer;">
+                            <input type="checkbox" id="chart-points" ${chart.showPoints ? 'checked' : ''}> Show Data Points
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-footer" style="padding: 15px; border-top: 1px solid #eee; display: flex; justify-content: flex-end; gap: 10px;">
+                    <button class="btn-cancel" style="padding: 8px 16px; border: 1px solid #ddd; background: white; border-radius: 4px; cursor: pointer;">Cancel</button>
+                    <button class="btn-save" style="padding: 8px 16px; background: var(--selection-color); color: white; border: none; border-radius: 4px; cursor: pointer;">Save</button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(overlay);
+        this.refreshIcons();
+
+        const close = () => { if (overlay.parentNode) overlay.remove(); };
+        overlay.querySelector('.close-modal')?.addEventListener('click', close);
+        overlay.querySelector('.btn-cancel')?.addEventListener('click', close);
+
+        overlay.querySelector('.btn-save')?.addEventListener('click', () => {
+            const title = (overlay.querySelector('#chart-title') as HTMLInputElement).value;
+            const type = (overlay.querySelector('#chart-type') as HTMLSelectElement).value as any;
+            const range = (overlay.querySelector('#chart-range') as HTMLInputElement).value;
+            const xAxisTitle = (overlay.querySelector('#chart-xaxis') as HTMLInputElement).value;
+            const yAxisTitle = (overlay.querySelector('#chart-yaxis') as HTMLInputElement).value;
+            const showPoints = (overlay.querySelector('#chart-points') as HTMLInputElement).checked;
+
+            chart.title = title;
+            chart.type = type;
+            chart.range = range;
+            chart.xAxisTitle = xAxisTitle;
+            chart.yAxisTitle = yAxisTitle;
+            chart.showPoints = showPoints;
+
+            const sheetName = this.store.getActiveSheetName();
+            const metadata = this.store.getMetadata(sheetName);
+            
+            if (isNew) {
+                metadata.charts.push(chart);
+            } else {
+                const idx = metadata.charts.findIndex(c => c.id === chart.id);
+                if (idx !== -1) metadata.charts[idx] = chart;
+            }
+
+            this.store.setMetadata(sheetName, metadata);
+            close();
+            this.renderCharts();
+        });
     }
 
     private getSelectionRangeString(): string {
@@ -5118,8 +5361,15 @@ export class SpreadsheetEngine {
             const header = document.createElement('div');
             header.style.display = 'flex';
             header.style.justifyContent = 'space-between';
+            header.style.alignItems = 'center';
             header.style.marginBottom = '10px';
-            header.innerHTML = `<strong>${chart.title}</strong><span class="close-chart" style="cursor:pointer"><i data-lucide="x"></i></span>`;
+            header.innerHTML = `
+                <strong>${chart.title}</strong>
+                <div style="display: flex; gap: 8px;">
+                    <span class="settings-chart" style="cursor:pointer" title="Chart Settings"><i data-lucide="settings"></i></span>
+                    <span class="close-chart" style="cursor:pointer" title="Delete Chart"><i data-lucide="x"></i></span>
+                </div>
+            `;
             chartDiv.appendChild(header);
 
             const svgContainer = document.createElement('div');
@@ -5129,12 +5379,14 @@ export class SpreadsheetEngine {
             chartDiv.appendChild(svgContainer);
 
             this.container.appendChild(chartDiv);
-        this.refreshIcons();
+            this.refreshIcons();
 
             // Dragging logic
             let isDragging = false;
             let offset = { x: 0, y: 0 };
             header.onmousedown = (e) => {
+                const target = e.target as HTMLElement;
+                if (target.closest('.settings-chart') || target.closest('.close-chart')) return;
                 isDragging = true;
                 offset = { x: e.clientX - chartDiv.offsetLeft, y: e.clientY - chartDiv.offsetTop };
             };
@@ -5151,6 +5403,10 @@ export class SpreadsheetEngine {
                     this.store.setMetadata(sheetName, metadata);
                 }
             };
+
+            header.querySelector('.settings-chart')?.addEventListener('click', () => {
+                this.showChartSettingsDialog(chart);
+            });
 
             header.querySelector('.close-chart')?.addEventListener('click', () => {
                 metadata.charts = metadata.charts.filter(c => c.id !== chart.id);
@@ -5189,7 +5445,7 @@ export class SpreadsheetEngine {
             .attr('height', '100%')
             .attr('viewBox', `0 0 ${width} ${height}`);
 
-        const margin = { top: 20, right: 20, bottom: 30, left: 40 };
+        const margin = { top: 20, right: 20, bottom: 40, left: 50 };
         const innerWidth = width - margin.left - margin.right;
         const innerHeight = height - margin.top - margin.bottom;
 
@@ -5199,7 +5455,28 @@ export class SpreadsheetEngine {
         const y = d3.scaleLinear().rangeRound([innerHeight, 0]);
 
         x.domain(data.map(d => d.label));
-        y.domain([0, d3.max(data, d => d.col1 || d.col0) as number]);
+        y.domain([0, d3.max(data, d => d.col1 || d.col0) as number * 1.1]);
+
+        // Add X-Axis Label
+        if (chart.xAxisTitle) {
+            g.append('text')
+                .attr('transform', `translate(${innerWidth / 2}, ${innerHeight + 35})`)
+                .style('text-anchor', 'middle')
+                .style('font-size', '10px')
+                .text(chart.xAxisTitle);
+        }
+
+        // Add Y-Axis Label
+        if (chart.yAxisTitle) {
+            g.append('text')
+                .attr('transform', 'rotate(-90)')
+                .attr('y', 0 - margin.left)
+                .attr('x', 0 - (innerHeight / 2))
+                .attr('dy', '1em')
+                .style('text-anchor', 'middle')
+                .style('font-size', '10px')
+                .text(chart.yAxisTitle);
+        }
 
         if (chart.type === 'bar') {
             g.append('g')
@@ -5240,6 +5517,17 @@ export class SpreadsheetEngine {
                 .attr('stroke', '#4285f4')
                 .attr('stroke-width', 2)
                 .attr('d', line);
+
+            if (chart.showPoints) {
+                g.selectAll('.dot')
+                    .data(data)
+                    .enter().append('circle')
+                    .attr('class', 'dot')
+                    .attr('cx', d => x(d.label)! + x.bandwidth() / 2)
+                    .attr('cy', d => y(d.col1 || d.col0))
+                    .attr('r', 3)
+                    .attr('fill', '#4285f4');
+            }
         } else if (chart.type === 'pie') {
             const radius = Math.min(innerWidth, innerHeight) / 2;
             const pie = d3.pie<any>().value(d => d.col1 || d.col0);
