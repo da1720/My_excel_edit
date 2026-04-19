@@ -199,6 +199,36 @@ body {
   line-height: 1;
 }
 
+@media (max-width: 768px) {
+  :root {
+    --header-size: 30px;
+    --ribbon-content-height: 60px;
+    --formula-bar-height: 50px;
+  }
+
+  .ribbon-tabs {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
+
+  .ribbon-group {
+    padding: 0 8px;
+  }
+
+  .tool-btn {
+    padding: 8px; 
+  }
+
+  .ribbon-label {
+    display: none; 
+  }
+
+  .formula-bar-input {
+    font-size: 16px !important; /* Prevent iOS zoom */
+  }
+}
+
 .tool-btn i, .tool-btn svg {
   width: 18px;
   height: 18px;

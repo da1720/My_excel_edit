@@ -1489,6 +1489,98 @@ export class SpreadsheetEngine {
             }
         });
 
+        // Mobile Touch Support
+        let lastTap = 0;
+        let touchStartX = 0;
+        let touchStartY = 0;
+
+        this.grid.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 1) {
+                touchStartX = e.touches[0].clientX;
+                touchStartY = e.touches[0].clientY;
+                
+                const target = e.target as HTMLElement;
+                if (target.classList.contains('grid-cell') && target.dataset.id === this.activeCell) {
+                    this.isSelecting = true;
+                }
+            }
+        }, { passive: true });
+
+        this.grid.addEventListener('touchmove', (e) => {
+            if (this.isSelecting && e.touches.length === 1) {
+                const moveX = Math.abs(e.touches[0].clientX - touchStartX);
+                const moveY = Math.abs(e.touches[0].clientY - touchStartY);
+                
+                if (moveX > 5 || moveY > 5) {
+                    if (e.cancelable) e.preventDefault();
+                    
+                    const touch = e.touches[0];
+                    const target = document.elementFromPoint(touch.clientX, touch.clientY) as HTMLElement;
+                    if (target) {
+                        if (target.classList.contains('grid-cell')) {
+                            const id = target.dataset.id!;
+                            this.selectCell(id, false, true); 
+                        } else if (target.classList.contains('col-header')) {
+                            const col = target.dataset.col!;
+                            this.selectColumn(col, false, true);
+                        } else if (target.classList.contains('row-header')) {
+                            const row = target.dataset.row!;
+                            this.selectRow(row, false, true);
+                        }
+                    }
+                }
+            }
+        }, { passive: false });
+
+        this.grid.addEventListener('touchend', (e) => {
+            if (this.isSelecting) {
+                this.isSelecting = false;
+                if (this.isFormatPainterActive && this.formatPainterSource) {
+                    this.applyFormatPainter();
+                }
+            }
+
+            if (e.changedTouches.length > 1) return;
+            
+            // Allow clicking if we barely moved (a tap, not a swipe/scroll)
+            const moveX = Math.abs(e.changedTouches[0].clientX - touchStartX);
+            const moveY = Math.abs(e.changedTouches[0].clientY - touchStartY);
+            if (moveX > 10 || moveY > 10) return;
+
+            const target = e.target as HTMLElement;
+            
+            if (this.isEditing && target.classList.contains('editing')) {
+                return;
+            }
+
+            if (target.classList.contains('grid-cell') || target.classList.contains('col-header') || target.classList.contains('row-header')) {
+                const currentTime = new Date().getTime();
+                const tapLength = currentTime - lastTap;
+                
+                if (tapLength < 400 && tapLength > 0) {
+                    // Double tap
+                    if (target.classList.contains('grid-cell')) {
+                        this.startEditing(target);
+                        e.preventDefault();
+                    }
+                } else {
+                    // Single tap
+                    if (target.classList.contains('grid-cell')) {
+                        const id = target.dataset.id!;
+                        this.selectCell(id);
+                    } else if (target.classList.contains('col-header')) {
+                        const col = target.dataset.col!;
+                        this.selectColumn(col);
+                    } else if (target.classList.contains('row-header')) {
+                        const row = target.dataset.row!;
+                        this.selectRow(row);
+                    }
+                    if (e.cancelable) e.preventDefault(); // Prevent duplicate mousedown/clicks
+                }
+                lastTap = currentTime;
+            }
+        });
+
         // Formula Bar Input
         this.formulaBar.addEventListener('input', () => {
             this.updateSuggestions(this.formulaBar, this.formulaBar.value);
@@ -1657,9 +1749,21 @@ export class SpreadsheetEngine {
                     if (this.selectedCells.size > 0) {
                         this.store.saveHistory();
                         this.selectedCells.forEach(id => this.commitValue(id, '', this.store.getActiveSheetName(), true));
-                        this.updateGridDisplay();
                     } else if (this.activeCell) {
                         this.commitValue(this.activeCell, '');
+                    }
+                    break;
+                default:
+                    // If typing a single character (letter, number, symbol), auto-start edit
+                    if (e.key.length === 1 && !isCtrl && !e.altKey && this.activeCell && !this.isEditing) {
+                        // Let the first keypress go into the cell by clearing the current content
+                        // then starting to edit.
+                        const cellElStart = this.grid.querySelector(`[data-id="${this.activeCell}"]`) as HTMLElement;
+                        if (cellElStart) {
+                            // Don't prevent default, let the browser capture the keystroke into the contentEditable
+                            this.store.saveHistory();
+                            this.startEditing(cellElStart, undefined, true);
+                        }
                     }
                     break;
             }
@@ -1953,7 +2057,45 @@ export class SpreadsheetEngine {
             isResizing = false;
             document.removeEventListener('mousemove', onMouseMove);
             document.removeEventListener('mouseup', onMouseUp);
+            document.removeEventListener('touchmove', onTouchMove);
+            document.removeEventListener('touchend', onMouseUp);
         };
+
+        const onTouchMove = (e: TouchEvent) => {
+            if (!isResizing || !target) return;
+            // Map touch to mouse-like behavior for resizing
+            const fakeEvent = {
+                pageX: e.touches[0].pageX,
+                pageY: e.touches[0].pageY
+            } as MouseEvent;
+            onMouseMove(fakeEvent);
+        };
+
+        this.grid.addEventListener('touchstart', (e) => {
+            const resizer = (e.target as HTMLElement).closest('.resizer') as HTMLElement;
+            if (!resizer || e.touches.length > 1) return;
+
+            isResizing = true;
+            target = resizer;
+            startX = e.touches[0].pageX;
+            startY = e.touches[0].pageY;
+
+            if (resizer.classList.contains('col-resizer')) {
+                const col = resizer.dataset.col!;
+                const header = resizer.parentElement!;
+                startSize = header.offsetWidth;
+            } else {
+                const row = resizer.dataset.row!;
+                const header = resizer.parentElement!;
+                startSize = header.offsetHeight;
+            }
+
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            document.addEventListener('touchend', onMouseUp);
+            
+            // Prevent default to avoid scrolling while resizing
+            if (e.cancelable) e.preventDefault();
+        }, { passive: false });
     }
 
     private updateSelectionIndicator() {
@@ -1974,12 +2116,14 @@ export class SpreadsheetEngine {
             this.selectedCells.forEach(id => {
                 const cellEl = this.grid.querySelector(`[data-id="${id}"]`) as HTMLElement;
                 if (cellEl) {
-                    hasVisibleCells = true;
                     const rect = cellEl.getBoundingClientRect();
-                    minLeft = Math.min(minLeft, rect.left);
-                    minTop = Math.min(minTop, rect.top);
-                    maxRight = Math.max(maxRight, rect.right);
-                    maxBottom = Math.max(maxBottom, rect.bottom);
+                    if (rect.width > 0 && rect.height > 0) {
+                        hasVisibleCells = true;
+                        minLeft = Math.min(minLeft, rect.left);
+                        minTop = Math.min(minTop, rect.top);
+                        maxRight = Math.max(maxRight, rect.right);
+                        maxBottom = Math.max(maxBottom, rect.bottom);
+                    }
                 }
             });
 
@@ -2041,7 +2185,8 @@ export class SpreadsheetEngine {
 
         this.activeCell = startId;
         this.updateToolbarState();
-        this.updateGridDisplay();
+        this.updateSelectionHighlightsOnly();
+        this.updateHeaderHighlights();
         this.updateSelectionIndicator();
     }
 
@@ -2077,7 +2222,8 @@ export class SpreadsheetEngine {
 
         this.activeCell = startId;
         this.updateToolbarState();
-        this.updateGridDisplay();
+        this.updateSelectionHighlightsOnly();
+        this.updateHeaderHighlights();
         this.updateSelectionIndicator();
     }
 
@@ -2126,7 +2272,70 @@ export class SpreadsheetEngine {
         this.formulaBar.value = cellData.formula || cellData.rawValue;
         
         this.updateToolbarState();
-        this.updateGridDisplay();
+        this.updateSelectionHighlightsOnly();
+        this.updateHeaderHighlights();
+        this.updateSelectionIndicator();
+    }
+
+    private updateSelectionHighlightsOnly() {
+        const sheetName = this.store.getActiveSheetName();
+        const cellsToUpdate = new Set<HTMLElement>();
+        
+        // Find previously selected/active cells
+        this.grid.querySelectorAll('.grid-cell.selected, .grid-cell.active').forEach(el => cellsToUpdate.add(el as HTMLElement));
+        
+        // Add currently selected cells
+        this.selectedCells.forEach(id => {
+            const el = this.grid.querySelector(`[data-id="${id}"]`) as HTMLElement;
+            if (el) cellsToUpdate.add(el);
+        });
+        
+        // Add currently active cell
+        if (this.activeCell) {
+            const el = this.grid.querySelector(`[data-id="${this.activeCell}"]`) as HTMLElement;
+            if (el) cellsToUpdate.add(el);
+        }
+
+        cellsToUpdate.forEach(cellEl => {
+            const id = cellEl.dataset.id!;
+            const isSelected = this.selectedCells.has(id);
+            const isActive = this.activeCell === id;
+            
+            const wasSelected = cellEl.classList.contains('selected');
+            const wasActive = cellEl.classList.contains('active');
+            
+            if (isSelected === wasSelected && isActive === wasActive) return;
+
+            const data = this.store.getCell(sheetName, id);
+            let finalFormat = { ...data.format };
+            
+            data.conditionalRules.forEach(rule => {
+                const val = data.computedValue;
+                let match = false;
+                const ruleVal = isNaN(Number(rule.value)) ? rule.value : Number(rule.value);
+                const cellVal = isNaN(Number(val)) ? val : Number(val);
+
+                switch (rule.operator) {
+                    case 'gt': match = Number(cellVal) > Number(ruleVal); break;
+                    case 'lt': match = Number(cellVal) < Number(ruleVal); break;
+                    case 'eq': match = cellVal == ruleVal; break;
+                    case 'contains': match = String(cellVal).includes(String(ruleVal)); break;
+                }
+
+                if (match) {
+                    finalFormat = { ...finalFormat, ...rule.format };
+                }
+            });
+
+            let bgColor = finalFormat.backgroundColor;
+            if (isSelected && !isActive) {
+                bgColor = `linear-gradient(var(--active-cell-bg), var(--active-cell-bg)), ${finalFormat.backgroundColor}`;
+            }
+            
+            (cellEl as HTMLElement).style.background = bgColor;
+            cellEl.classList.toggle('selected', isSelected);
+            cellEl.classList.toggle('active', isActive);
+        });
     }
 
     private updateToolbarState() {
@@ -2184,7 +2393,7 @@ export class SpreadsheetEngine {
         return range;
     }
 
-    private startEditing(cellEl: HTMLElement, event?: MouseEvent) {
+    private startEditing(cellEl: HTMLElement, event?: MouseEvent, clearContent: boolean = false) {
         if (this.isEditing && cellEl.classList.contains('editing')) return;
 
         const id = cellEl.dataset.id!;
@@ -2193,7 +2402,7 @@ export class SpreadsheetEngine {
         this.isEditing = true;
         cellEl.contentEditable = 'true';
         cellEl.classList.add('editing');
-        cellEl.textContent = cellData.formula || cellData.rawValue;
+        cellEl.textContent = clearContent ? '' : (cellData.formula || cellData.rawValue);
         cellEl.focus();
 
         // Position caret
@@ -2440,18 +2649,22 @@ export class SpreadsheetEngine {
             cell.rawValue = input;
         }
 
-        this.recalculate(id, sheetName);
+        const updatedIds = this.recalculate(id, sheetName);
         if (sheetName === this.store.getActiveSheetName()) {
-            this.updateGridDisplay();
+            updatedIds.add(id);
+            this.updateGridDisplay(updatedIds);
             if (this.activeCell === id) {
                 this.formulaBar.value = input;
             }
+        } else if (updatedIds.size > 0) {
+            this.updateGridDisplay(updatedIds);
         }
     }
 
-    private recalculate(startId: string, startSheet: string = this.store.getActiveSheetName()) {
+    private recalculate(startId: string, startSheet: string = this.store.getActiveSheetName()): Set<string> {
         const queue: { sheet: string, id: string }[] = [{ sheet: startSheet, id: startId }];
         const visited = new Set<string>();
+        const updatedInActiveSheet = new Set<string>();
 
         while (queue.length > 0) {
             const { sheet: sName, id } = queue.shift()!;
@@ -2461,6 +2674,10 @@ export class SpreadsheetEngine {
                 continue;
             }
             visited.add(key);
+            
+            if (sName === this.store.getActiveSheetName()) {
+                updatedInActiveSheet.add(id);
+            }
 
             const parser = new FormulaParser(this.store, sName);
             const cell = this.store.getCell(sName, id);
@@ -2484,6 +2701,7 @@ export class SpreadsheetEngine {
                 queue.push({ sheet: depSheet, id: depId });
             });
         }
+        return updatedInActiveSheet;
     }
 
     private renderSparkline(data: number[]): string {
@@ -2519,26 +2737,39 @@ export class SpreadsheetEngine {
             if (row) activeRows.add(row);
         });
         
+        const highlightAllCols = activeCols.size === DEFAULT_COLS;
+        const highlightAllRows = activeRows.size === DEFAULT_ROWS;
+        const isAllSelected = highlightAllCols && highlightAllRows;
+        
         this.grid.querySelectorAll('.col-header').forEach(h => {
             const col = (h as HTMLElement).dataset.col;
-            if (col) h.classList.toggle('active-header', activeCols.has(col));
+            if (col) h.classList.toggle('active-header', isAllSelected ? true : (!highlightAllRows && activeCols.has(col)));
         });
         
         this.grid.querySelectorAll('.row-header').forEach(h => {
             const row = (h as HTMLElement).dataset.row;
-            if (row) h.classList.toggle('active-header', activeRows.has(row));
+            if (row) h.classList.toggle('active-header', isAllSelected ? true : (!highlightAllCols && activeRows.has(row)));
         });
 
         // Corner header highlight if everything is selected
-        const isAllSelected = this.selectedCells.size === DEFAULT_ROWS * DEFAULT_COLS;
         this.grid.querySelector('.corner-header')?.classList.toggle('active-header', isAllSelected);
     }
 
-    private updateGridDisplay() {
+    private updateGridDisplay(idsToUpdate?: Iterable<string>) {
         const sheetName = this.store.getActiveSheetName();
-        const cells = this.grid.querySelectorAll('.grid-cell');
+        let cells: HTMLElement[] = [];
+        
+        if (idsToUpdate) {
+            for (const id of idsToUpdate) {
+                const el = this.grid.querySelector(`.grid-cell[data-id="${id}"]`) as HTMLElement;
+                if (el) cells.push(el);
+            }
+        } else {
+            cells = Array.from(this.grid.querySelectorAll('.grid-cell'));
+        }
+
         cells.forEach(cellEl => {
-            const id = (cellEl as HTMLElement).dataset.id!;
+            const id = cellEl.dataset.id!;
             const data = this.store.getCell(sheetName, id);
             
             let displayValue = data.computedValue?.toString() || '';
@@ -3709,7 +3940,7 @@ export class SpreadsheetEngine {
         if (btn) btn.classList.remove('active');
         this.grid.style.cursor = 'default';
         
-        this.updateGridDisplay();
+        this.updateGridDisplay(this.selectedCells);
     }
 
     private setTextColor(color: string) {
@@ -3728,7 +3959,7 @@ export class SpreadsheetEngine {
             if (span) span.style.borderBottomColor = color;
         }
 
-        this.updateGridDisplay();
+        this.updateGridDisplay(this.selectedCells);
     }
 
     private setFillColor(color: string) {
@@ -3747,7 +3978,7 @@ export class SpreadsheetEngine {
             if (span) span.style.borderBottomColor = color;
         }
 
-        this.updateGridDisplay();
+        this.updateGridDisplay(this.selectedCells);
     }
 
     private toggleFormat(type: keyof CellFormat, value?: any) {
@@ -3769,7 +4000,7 @@ export class SpreadsheetEngine {
             });
         }
         
-        this.updateGridDisplay();
+        this.updateGridDisplay(this.selectedCells);
         this.updateToolbarState();
     }
 
@@ -3784,7 +4015,7 @@ export class SpreadsheetEngine {
             cell.format.textAlign = align;
         });
         
-        this.updateGridDisplay();
+        this.updateGridDisplay(this.selectedCells);
         this.updateToolbarState();
     }
 
@@ -3799,7 +4030,7 @@ export class SpreadsheetEngine {
             cell.format.type = type;
         });
         
-        this.updateGridDisplay();
+        this.updateGridDisplay(this.selectedCells);
         this.updateToolbarState();
     }
 
@@ -3834,7 +4065,6 @@ export class SpreadsheetEngine {
         this.selectedCells.forEach(id => {
             this.commitValue(id, '', sheetName, true);
         });
-        this.updateGridDisplay();
     }
 
     private pasteFromClipboard(mode: 'all' | 'values' | 'formats' | 'formulas' = 'all') {
@@ -3849,6 +4079,8 @@ export class SpreadsheetEngine {
 
         const targetCol = colToIdx(this.activeCell.match(/[A-Z]+/)?.[0]!);
         const targetRow = parseInt(this.activeCell.match(/[0-9]+/)?.[0]!);
+
+        const affectedCells = new Set<string>();
 
         this.clipboard.forEach(item => {
             const itemCol = colToIdx(item.id.match(/[A-Z]+/)?.[0]!);
@@ -3876,11 +4108,13 @@ export class SpreadsheetEngine {
                     cell.format = { ...item.data.format };
                 }
                 
-                this.recalculate(destId);
+                const chainedDeps = this.recalculate(destId);
+                chainedDeps.forEach(depId => affectedCells.add(depId));
+                affectedCells.add(destId);
             }
         });
 
-        this.updateGridDisplay();
+        this.updateGridDisplay(affectedCells);
         this.updateToolbarState();
     }
 
