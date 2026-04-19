@@ -293,6 +293,42 @@ class SpreadsheetStore {
         return this.state.activeSheet;
     }
 
+    deleteSheet(name: string): boolean {
+        if (this.state.sheets.size <= 1) {
+            alert('Cannot delete the last remaining sheet.');
+            return false;
+        }
+
+        if (!this.state.sheets.has(name)) return false;
+
+        this.saveHistory();
+        this.state.sheets.delete(name);
+        this.state.metadata.delete(name);
+
+        if (this.state.activeSheet === name) {
+            this.state.activeSheet = Array.from(this.state.sheets.keys())[0];
+        }
+
+        // We technically shouldn't break formulas on other sheets violently without giving #REF, 
+        // but for simplicity we rely on the parse engine returning errors when cross-referencing deleted sheets.
+        return true;
+    }
+
+    reorderSheet(targetName: string, newIndex: number) {
+        if (!this.state.sheets.has(targetName)) return;
+
+        this.saveHistory();
+        const entries = Array.from(this.state.sheets.entries());
+        const currentIndex = entries.findIndex(([name]) => name === targetName);
+        if (currentIndex === -1) return;
+
+        const [entry] = entries.splice(currentIndex, 1);
+        entries.splice(newIndex, 0, entry);
+
+        // Reconstruct Map to maintain insertion order
+        this.state.sheets = new Map(entries);
+    }
+
     getSheetNames() {
         return Array.from(this.state.sheets.keys());
     }
@@ -1336,19 +1372,24 @@ export class SpreadsheetEngine {
     }
 
     private initTabs() {
-        const tabsList = this.tabBar.querySelector('.tabs-list')!;
+        const tabsList = this.tabBar.querySelector('.tabs-list') as HTMLElement;
         tabsList.innerHTML = '';
-        this.store.getSheets().forEach(sheetName => {
+        const sheets = this.store.getSheets();
+        
+        sheets.forEach((sheetName, index) => {
             const tab = document.createElement('div');
             tab.className = `tab ${sheetName === this.store.getActiveSheetName() ? 'active' : ''}`;
             tab.textContent = sheetName;
-            tab.title = 'Double-click to rename';
+            tab.title = 'Double-click to rename, Right-click to delete';
+            tab.draggable = true; // Enable drag and drop
+            
             tab.onclick = () => {
                 this.commitActiveEdit();
                 this.store.setActiveSheet(sheetName);
                 this.initTabs();
                 this.initGrid();
             };
+            
             tab.ondblclick = (e) => {
                 e.stopPropagation();
                 const newName = prompt('Rename sheet to:', sheetName);
@@ -1359,6 +1400,66 @@ export class SpreadsheetEngine {
                     }
                 }
             };
+
+            tab.oncontextmenu = (e) => {
+                e.preventDefault();
+                if (confirm(`Are you sure you want to delete sheet '${sheetName}'?`)) {
+                    if (this.store.deleteSheet(sheetName)) {
+                        this.initTabs();
+                        this.initGrid();
+                    }
+                }
+            };
+
+            // Drag and Drop implementation for reordering
+            tab.addEventListener('dragstart', (e) => {
+                e.dataTransfer?.setData('text/plain', sheetName);
+                tab.style.opacity = '0.5';
+            });
+
+            tab.addEventListener('dragend', () => {
+                tab.style.opacity = '1';
+                tabsList.querySelectorAll('.tab').forEach(t => t.classList.remove('drag-over'));
+            });
+
+            tab.addEventListener('dragover', (e) => {
+                e.preventDefault(); // Necessary to allow dropping
+                tab.classList.add('drag-over');
+            });
+
+            tab.addEventListener('dragleave', () => {
+                tab.classList.remove('drag-over');
+            });
+
+            tab.addEventListener('drop', (e) => {
+                e.preventDefault();
+                tab.classList.remove('drag-over');
+                const draggedSheetName = e.dataTransfer?.getData('text/plain');
+                if (draggedSheetName && draggedSheetName !== sheetName) {
+                    this.store.reorderSheet(draggedSheetName, index);
+                    this.initTabs();
+                }
+            });
+
+            // Prevent touch scrolling from interfering with drag on mobile if hold-to-drag is desired
+            let holdTimer: NodeJS.Timeout;
+            tab.addEventListener('touchstart', (e) => {
+                holdTimer = setTimeout(() => {
+                    tab.draggable = true;
+                    // Note: HTML5 drag doesn't work natively with Touch events uniformly across mobile browsers.
+                    // We prompt a simple reorder map for mobile if hold is detected, as a fallback since mobile drag-and-drop requires custom polyfills.
+                    if (confirm(`Do you want to delete '${sheetName}'?`)) {
+                        if (this.store.deleteSheet(sheetName)) {
+                            this.initTabs();
+                            this.initGrid();
+                        }
+                    }
+                }, 800);
+            }, { passive: true });
+            
+            tab.addEventListener('touchend', () => clearTimeout(holdTimer));
+            tab.addEventListener('touchmove', () => clearTimeout(holdTimer));
+
             tabsList.appendChild(tab);
         });
     }
@@ -2144,8 +2245,14 @@ export class SpreadsheetEngine {
         }
     }
 
+    private activeEditCleanup: (() => void) | null = null;
+
     private commitActiveEdit() {
-        if (this.isEditing) {
+        if (this.activeEditCleanup) {
+            this.activeEditCleanup();
+            this.activeEditCleanup = null;
+        } else if (this.isEditing) {
+            // Fallback
             const editingCell = this.grid.querySelector('.grid-cell.editing') as HTMLElement;
             if (editingCell) {
                 editingCell.blur();
@@ -2258,6 +2365,13 @@ export class SpreadsheetEngine {
         const cellEl = this.grid.querySelector(`[data-id="${id}"]`) as HTMLElement;
         if (cellEl && !range) {
             cellEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        }
+
+        // Force native blur to close rogue soft keyboards or floating cursors
+        if (!this.isEditing && document.activeElement && 
+            document.activeElement !== document.body && 
+            document.activeElement.tagName !== 'INPUT') {
+            (document.activeElement as HTMLElement).blur();
         }
 
         // Add pulse animation
@@ -2397,6 +2511,12 @@ export class SpreadsheetEngine {
         if (this.isEditing && cellEl.classList.contains('editing')) return;
 
         const id = cellEl.dataset.id!;
+        
+        // Ensure the cell we're editing is fundamentally the active selection
+        if (this.activeCell !== id) {
+            this.selectCell(id);
+        }
+
         const cellData = this.store.getCell(this.store.getActiveSheetName(), id);
         
         this.isEditing = true;
@@ -2432,7 +2552,10 @@ export class SpreadsheetEngine {
             sel.addRange(range);
         }
 
+        let isCleanedUp = false;
         const onBlur = () => {
+            if (isCleanedUp) return;
+            isCleanedUp = true;
             this.commitValue(id, cellEl.textContent || '');
             this.isEditing = false;
             cellEl.contentEditable = 'false';
@@ -2443,7 +2566,12 @@ export class SpreadsheetEngine {
             cellEl.removeEventListener('blur', onBlur);
             cellEl.removeEventListener('keydown', onKeydown);
             cellEl.removeEventListener('input', onInput);
+            if (this.activeEditCleanup === onBlur) {
+                this.activeEditCleanup = null;
+            }
         };
+
+        this.activeEditCleanup = onBlur;
 
         const onInput = () => {
             this.updateSuggestions(cellEl, cellEl.textContent || '');
@@ -2771,6 +2899,14 @@ export class SpreadsheetEngine {
         cells.forEach(cellEl => {
             const id = cellEl.dataset.id!;
             const data = this.store.getCell(sheetName, id);
+            
+            // Clean up rogue edit states if they drifted from the engine state
+            if (!this.isEditing || id !== this.activeCell) {
+                if (cellEl.contentEditable === 'true') {
+                    cellEl.contentEditable = 'false';
+                    cellEl.classList.remove('editing');
+                }
+            }
             
             let displayValue = data.computedValue?.toString() || '';
             

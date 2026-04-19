@@ -524,6 +524,19 @@ body {
   gap: 2px;
 }
 
+.tabs-list {
+  display: flex;
+  flex-direction: row;
+  height: 100%;
+  align-items: center;
+  overflow-x: auto;
+  gap: 2px;
+}
+
+.tabs-list::-webkit-scrollbar {
+  display: none;
+}
+
 .tab {
   padding: 0 20px;
   height: 100%;
@@ -536,6 +549,8 @@ body {
   border-radius: 4px 4px 0 0;
   cursor: pointer;
   transition: all 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .tab:hover {
@@ -547,6 +562,11 @@ body {
   color: var(--selection-color);
   font-weight: 500;
   border-color: var(--border-color);
+}
+
+.tab.drag-over {
+  border-left: 2px solid var(--selection-color);
+  padding-left: 18px; /* Offset the border width to prevent jiggle */
 }
 
 .add-sheet-btn {
