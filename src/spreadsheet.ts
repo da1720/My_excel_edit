@@ -2738,6 +2738,9 @@ export class SpreadsheetEngine {
 
         const onInput = () => {
             this.updateSuggestions(cellEl, cellEl.textContent || '');
+            if (this.formulaBar) {
+                this.formulaBar.value = cellEl.textContent || '';
+            }
         };
 
         const onKeydown = (e: KeyboardEvent) => {
@@ -2892,7 +2895,12 @@ export class SpreadsheetEngine {
         const cell = this.store.getCell(sheetName, id);
         
         // Check if value actually changed
-        if (cell.formula === input || (cell.formula === '' && cell.rawValue === input)) return;
+        const isFormula = input.startsWith('=');
+        if (isFormula) {
+            if (cell.formula === input) return;
+        } else {
+            if (cell.formula === '' && cell.rawValue === input) return;
+        }
 
         if (!skipHistory) this.store.saveHistory();
 
